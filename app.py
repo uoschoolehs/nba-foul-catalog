@@ -70,8 +70,8 @@ def fetch_unthrottled_cdn_catalog(gid):
     
     # Updated NBA APIs endpoints
     pbp_url = f"https://stats.nba.com/stats/playbyplayv3?GameID={gid}&StartPeriod=0&EndPeriod=0"
-    # New video layout endpoint used by modern stats interface
-    video_cdn_url = f"https://stats.nba.com/stats/videoeventsasset?GameID={gid}"
+    # Official video events playlist config route
+    video_cdn_url = f"https://stats.nba.com/stats/videoeventsv3?GameID={gid}"
     
     # 1. Pull Play-By-Play structural feed
     try:
@@ -86,32 +86,22 @@ def fetch_unthrottled_cdn_catalog(gid):
         debug_metrics["pbp_error"] = str(e)
         return catalog, debug_metrics
 
-    # 2. Pull Video Event assets mapping (Updated endpoint strategy)
+    # 2. Pull Video Event assets mapping (Using VideoEventsV3 layout)
     video_map = {}
     try:
         vid_res = requests.get(video_cdn_url, headers=CHROME_HEADERS, timeout=10, impersonate="chrome110")
         debug_metrics["video_status"] = vid_res.status_code
         if vid_res.status_code == 200:
             vid_data = vid_res.json()
-            # Parse the modern stats video dictionary format
-            if "resultSets" in vid_data and isinstance(vid_data["resultSets"], list):
-                for rset in vid_data["resultSets"]:
-                    if rset.get("name") == "VideoEvents" or "rowSet" in rset:
-                        rows = rset.get("rowSet", [])
-                        headers = rset.get("headers", [])
-                        
-                        # Find indices for critical values safely
-                        try:
-                            ei_idx = headers.index("EVENTNUM")
-                            url_idx = headers.index("VIDEO_URL")
-                        except ValueError:
-                            continue
-                            
-                        if rows:
-                            debug_metrics["raw_video_sample"] = rows[0]
-                        for row in rows:
-                            if len(row) > max(ei_idx, url_idx):
-                                video_map[str(row[ei_idx])] = row[url_idx]
+            # Extract video metadata tracks from videoEvents results layout
+            playlist = vid_data.get("playlist", [])
+            if playlist:
+                debug_metrics["raw_video_sample"] = playlist[0]
+                for item in playlist:
+                    event_id = item.get("ei") # 'ei' matches structural actionNumber
+                    video_url = item.get("url") # Direct unexpiring stream url asset
+                    if event_id and video_url:
+                        video_map[str(event_id)] = video_url
             debug_metrics["video_keys_found"] = len(video_map)
         else:
             debug_metrics["video_error"] = f"Non-200 return payload: {vid_res.text[:120]}"
@@ -143,7 +133,7 @@ def fetch_unthrottled_cdn_catalog(gid):
                 if "." in clean_clock:
                     clean_clock = clean_clock.split(".")[0]
                 
-                # Map video URL if found, or create working direct browser fallbacks
+                # Assign video url if found, or fall back gracefully
                 final_video_url = video_map.get(event_id)
                 if not final_video_url:
                     final_video_url = f"https://www.nba.com/stats/events/?GameEventID={event_id}&GameID={gid}"
@@ -167,7 +157,7 @@ def fetch_unthrottled_cdn_catalog(gid):
     return catalog, debug_metrics
 
 
-# --- EXECUTION STARTS HERE NOW THAT FUNCTIONS ARE DEFINED ---
+# --- EXECUTION ENGINE STARTS HERE ---
 
 # Trigger downstream analytics engine
 live_catalog, debug_logs = fetch_unthrottled_cdn_catalog(game_id)
