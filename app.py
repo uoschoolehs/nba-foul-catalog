@@ -1,4 +1,6 @@
 import re
+import os
+import json
 import time
 import streamlit as st
 from curl_cffi import requests
@@ -9,10 +11,6 @@ st.title("🏀 NBA Live Foul Catalog")
 
 game_id = st.sidebar.text_input("NBA Game ID", value="0042500403")
 
-# ── Headers ──────────────────────────────────────────────────────────────────
-# x-nba-stats-* headers are required by stats.nba.com endpoints.
-# impersonate='chrome120' makes curl_cffi spoof the TLS fingerprint — this is
-# what actually bypasses Akamai, not just the header strings.
 STATS_HEADERS = {
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
@@ -40,16 +38,17 @@ CDN_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 }
 
-IMPERSONATE = "chrome120"
+IMPERSONATE   = "chrome120"
+DISK_CACHE    = "nba_video_cache.json"
+MAX_WORKERS   = 47  # one thread per foul — all fire simultaneously
+
 
 # ── Foul Parser ───────────────────────────────────────────────────────────────
 def parse_foul_details(desc, fallback_name="Unknown"):
     if not desc:
         return fallback_name, "Personal"
-
     lower = desc.lower()
 
-    # Foul type — order matters (most specific first)
     if "flagrant.foul.type2" in lower or "flagrant type 2" in lower:
         foul_type = "Flagrant Type 2"
     elif "flagrant.foul.type1" in lower or "flagrant type 1" in lower:
@@ -75,13 +74,11 @@ def parse_foul_details(desc, fallback_name="Unknown"):
     else:
         foul_type = "Personal"
 
-    # Player name: everything before the first foul keyword
     FOUL_KEYWORDS = [
         "flagrant", "l.b.foul", "loose", "personal", "s.foul", "p.foul",
         "off.foul", "t.foul", "take foul", "clear path", "away from play",
         "shooting", "offensive", "technical", "foul",
     ]
-    # Split on the EARLIEST keyword match position
     split_pos = len(desc)
     for kw in FOUL_KEYWORDS:
         idx = lower.find(kw)
@@ -89,14 +86,42 @@ def parse_foul_details(desc, fallback_name="Unknown"):
             split_pos = idx
 
     raw_name = desc[:split_pos].strip().rstrip(".")
-    player_name = raw_name if raw_name else fallback_name
-    return player_name, foul_type
+    return (raw_name if raw_name else fallback_name), foul_type
+
+
+# ── Persistent disk cache ─────────────────────────────────────────────────────
+# Structure on disk: { "game_id": { "event_id": "mp4_url" } }
+# Loaded once at server startup via cache_resource, then kept in memory.
+# Written to disk whenever new URLs are resolved so restarts don't lose work.
+
+@st.cache_resource
+def get_video_store():
+    """
+    Process-level dict shared across ALL sessions and reruns.
+    Survives tab closes, page refreshes, and filter changes.
+    Pre-seeded from disk on first call so server restarts are also fast.
+    """
+    store = {}
+    if os.path.exists(DISK_CACHE):
+        try:
+            with open(DISK_CACHE) as f:
+                store = json.load(f)
+        except Exception:
+            pass
+    return store
+
+def save_to_disk(store):
+    """Best-effort disk write — never blocks or crashes the app if it fails."""
+    try:
+        with open(DISK_CACHE, "w") as f:
+            json.dump(store, f)
+    except Exception:
+        pass
 
 
 # ── PBP Fetch ────────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False, ttl=300)
 def fetch_foul_catalog(gid):
-    """Fetch play-by-play and return list of foul dicts. Tries stats then CDN."""
     debug = {"pbp_status": "Not Attempted", "pbp_error": None, "source": None}
     catalog = []
 
@@ -141,13 +166,11 @@ def fetch_foul_catalog(gid):
             atype == "foul"
             or "foul" in sub
             or "foul" in desc.lower()
-            # offensive fouls sometimes logged as turnovers
             or (atype == "turnover" and "offensive" in sub)
         )
         if not is_foul:
             continue
 
-        # actionNumber is the real GameEventID for videoeventsasset
         event_id = act.get("actionNumber")
         if event_id is None:
             continue
@@ -155,19 +178,19 @@ def fetch_foul_catalog(gid):
 
         raw_clock = act.get("clock", "PT00M00.00S")
         clean_clock = raw_clock.replace("PT", "").replace("M", ":").replace("S", "")
-        clean_clock = clean_clock.split(".")[0]  # drop sub-seconds
+        clean_clock = clean_clock.split(".")[0]
 
         fallback_name = act.get("playerNameI") or act.get("playerName") or "Unknown"
         p_name, f_type = parse_foul_details(desc, fallback_name)
 
         catalog.append({
             "foul_number": foul_idx,
-            "event_id": event_id,
-            "quarter": act.get("period", 1),
-            "clock": clean_clock,
-            "team": act.get("teamTricode", "?"),
-            "player": p_name,
-            "type": f_type,
+            "event_id":    event_id,
+            "quarter":     act.get("period", 1),
+            "clock":       clean_clock,
+            "team":        act.get("teamTricode", "?"),
+            "player":      p_name,
+            "type":        f_type,
             "description": desc,
         })
         foul_idx += 1
@@ -175,22 +198,21 @@ def fetch_foul_catalog(gid):
     return catalog, debug
 
 
-# ── Video URL Fetch (single) ──────────────────────────────────────────────────
+# ── Single video fetch ────────────────────────────────────────────────────────
 def _fetch_one_video(gid, event_id):
-    """Returns (event_id, mp4_url_or_None). Retries up to 3 times with backoff."""
+    """Returns (event_id, mp4_url_or_None). Retries up to 3× with backoff."""
     url = f"https://stats.nba.com/stats/videoeventsasset?GameEventID={event_id}&GameID={gid}"
-
     for attempt in range(3):
         try:
             if attempt > 0:
-                time.sleep(1.5 * attempt)  # 1.5s then 3s
+                time.sleep(1.5 * attempt)
             r = requests.get(url, headers=STATS_HEADERS, impersonate=IMPERSONATE, timeout=15)
             if r.status_code == 429:
                 time.sleep(2)
                 continue
             if r.status_code != 200:
                 continue
-            data = r.json()
+            data  = r.json()
             rsets = data.get("resultSets", {})
 
             video_urls = []
@@ -203,38 +225,37 @@ def _fetch_one_video(gid, event_id):
                         break
 
             for v in video_urls:
-                # surl added — confirmed present in API response
                 for key in ("lurl", "murl", "surl", "hdurl", "sdurl", "vurl"):
                     val = v.get(key, "")
                     if val and (".mp4" in val.lower() or ".m3u8" in val.lower()):
                         return event_id, val
         except Exception:
             continue
-
     return event_id, None
 
 
-# ── Bulk Concurrent Video Fetch ───────────────────────────────────────────────
-# NOTE: intentionally NOT using @st.cache_data here.
-# cache_data permanently stores None for events that failed on first load
-# (e.g. rate-limit burst) and never retries them.
-# session_state only stores successes — failures stay missing and get retried
-# on every load until they resolve.
-
-def fetch_videos_into_session(gid, event_ids):
+# ── Bulk concurrent fetch ─────────────────────────────────────────────────────
+def fetch_missing_videos(gid, event_ids, store):
     """
-    Fetches URLs for any event_ids not already in session_state.video_cache.
-    Only writes successful results. Mutates session state directly.
+    Fire one thread per missing event ID simultaneously.
+    Only writes successes into the shared store and disk cache.
     """
-    missing = [eid for eid in event_ids if eid not in st.session_state.video_cache]
+    game_store = store.setdefault(gid, {})
+    missing    = [eid for eid in event_ids if eid not in game_store]
     if not missing:
         return
-    with ThreadPoolExecutor(max_workers=6) as pool:
+
+    newly_resolved = {}
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
         futures = {pool.submit(_fetch_one_video, gid, eid): eid for eid in missing}
         for fut in as_completed(futures):
             eid, url = fut.result()
-            if url is not None:
-                st.session_state.video_cache[eid] = url
+            if url:
+                newly_resolved[eid] = url
+
+    if newly_resolved:
+        game_store.update(newly_resolved)
+        save_to_disk(store)          # persist so next server restart is instant
 
 
 def fallback_link(gid, entry):
@@ -254,7 +275,6 @@ def fallback_link(gid, entry):
 with st.spinner("Loading play-by-play data..."):
     live_catalog, debug_logs = fetch_foul_catalog(game_id)
 
-# Debug sidebar
 st.sidebar.markdown("---")
 with st.sidebar.expander("🛠️ Network Debug", expanded=False):
     st.write(f"**PBP Status:** `{debug_logs['pbp_status']}`")
@@ -263,7 +283,7 @@ with st.sidebar.expander("🛠️ Network Debug", expanded=False):
         st.error(debug_logs["pbp_error"])
 
 if not live_catalog:
-    st.error("❌ Could not fetch game data. Check the Network Debug panel in the sidebar.")
+    st.error("❌ Could not fetch game data. Check the Network Debug panel.")
     st.stop()
 
 # ── Filters ───────────────────────────────────────────────────────────────────
@@ -284,39 +304,29 @@ filtered = [
 ]
 
 st.metric("Fouls Found", len(filtered))
-
 if not filtered:
     st.info("No fouls match the current filters.")
     st.stop()
 
-# ── Session state init ────────────────────────────────────────────────────────
-# Reset video cache if game ID changes
-if st.session_state.get("cached_game_id") != game_id:
-    st.session_state.video_cache = {}
-    st.session_state.cached_game_id = game_id
-
-# ── Bulk-fetch ALL video URLs up front ───────────────────────────────────────
-# Fetch across ALL fouls (not just filtered) so switching filters doesn't re-fetch
+# ── Fetch video URLs ──────────────────────────────────────────────────────────
+video_store  = get_video_store()           # process-level shared dict
 all_event_ids = [e["event_id"] for e in live_catalog]
-missing_count = sum(1 for eid in all_event_ids if eid not in st.session_state.video_cache)
+game_store    = video_store.get(game_id, {})
+missing_count = sum(1 for eid in all_event_ids if eid not in game_store)
 
 if missing_count:
-    with st.spinner(f"Fetching {missing_count} video link(s)..."):
-        fetch_videos_into_session(game_id, all_event_ids)
+    with st.spinner(f"Fetching {missing_count} video link(s) — all in parallel..."):
+        fetch_missing_videos(game_id, all_event_ids, video_store)
+    game_store = video_store.get(game_id, {})   # re-read after update
 
-# Build video_map for the filtered view
-video_map = {eid: st.session_state.video_cache.get(eid) for eid in all_event_ids}
-
-hit  = sum(1 for v in video_map.values() if v)
-miss = len(video_map) - hit
+hit  = sum(1 for eid in all_event_ids if game_store.get(eid))
+miss = len(all_event_ids) - hit
 
 col_stat, col_retry = st.columns([4, 1])
 with col_stat:
     st.caption(f"✅ {hit} videos resolved · ⚠️ {miss} unresolved")
 with col_retry:
     if miss > 0 and st.button("🔄 Retry failed"):
-        # Force retry by removing the game ID guard — next run re-fetches missing ones
-        st.session_state.cached_game_id = None
         st.rerun()
 
 # ── Playlist Mode ─────────────────────────────────────────────────────────────
@@ -328,9 +338,9 @@ if "video_index" not in st.session_state:
 if st.session_state.video_index >= len(filtered):
     st.session_state.video_index = 0
 
-idx = st.session_state.video_index
-active = filtered[idx]
-active_url = video_map.get(active["event_id"])
+idx        = st.session_state.video_index
+active     = filtered[idx]
+active_url = game_store.get(active["event_id"])
 
 st.sidebar.write(f"Clip **{idx + 1}** / **{len(filtered)}**")
 st.sidebar.write(f"**{active['player']}** ({active['team']}) — {active['type']}")
@@ -339,7 +349,7 @@ st.sidebar.write(f"Q{active['quarter']} · {active['clock']}")
 if active_url:
     st.sidebar.video(active_url)
 else:
-    st.sidebar.warning("Video unavailable from server.")
+    st.sidebar.warning("Video unavailable.")
     st.sidebar.markdown(f"[🔗 View on NBA.com]({fallback_link(game_id, active)})")
 
 col_prev, col_next = st.sidebar.columns(2)
@@ -356,7 +366,7 @@ with col_next:
 st.markdown("### Clip Index")
 
 for entry in filtered:
-    clip_url = video_map.get(entry["event_id"])
+    clip_url = game_store.get(entry["event_id"])
     with st.container():
         col1, col2 = st.columns([2, 3])
         with col1:
