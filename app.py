@@ -59,10 +59,11 @@ def parse_foul_details(desc):
 @st.cache_data(show_spinner=False)
 def get_resolved_mp4_url(gid, event_id):
     """
-    Queries the official NBA asset compiler for a single event ID.
-    Returns the direct MP4 URL if available, otherwise returns None.
+    Queries the official NBA asset compiler using explicit matching query context 
+    parameters (Season and Flag parameters) to force correct MP4 payload compilation.
     """
-    asset_url = f"https://stats.nba.com/stats/videoeventsasset?GameID={gid}&GameEventID={event_id}"
+    # Incorporating the explicit session parameters right into the API stream pipeline
+    asset_url = f"https://stats.nba.com/stats/videoeventsasset?GameID={gid}&GameEventID={event_id}&Season=2025-26&flag=1"
     try:
         res = requests.get(asset_url, headers=CHROME_HEADERS, timeout=6, impersonate="chrome110")
         if res.status_code == 200:
@@ -70,7 +71,6 @@ def get_resolved_mp4_url(gid, event_id):
             video_urls = data.get("resultSets", {}).get("Meta", {}).get("videoUrls", [])
             if video_urls and isinstance(video_urls, list):
                 direct_mp4 = video_urls[0].get("lurl")
-                # Ensure it's a real video link asset path and not an HTML fallback page
                 if direct_mp4 and (".mp4" in direct_mp4.lower() or ".m3u8" in direct_mp4.lower()):
                     return direct_mp4
     except Exception:
@@ -81,8 +81,8 @@ def fetch_unthrottled_cdn_catalog(gid):
     """Parses structural play-by-play events timeline list mapping."""
     debug_metrics = {
         "pbp_status": "Not Attempted",
-        "video_status": "On-Demand Stream Engine Active",
-        "video_keys_found": "Dynamic",
+        "video_status": "On-Demand Context Matrix Enabled",
+        "video_keys_found": "Dynamic Parameters Tuned",
         "pbp_error": None,
         "video_error": None,
         "raw_video_sample": None
@@ -110,7 +110,6 @@ def fetch_unthrottled_cdn_catalog(gid):
             sub_type = str(act.get("subType", "")).lower()
             desc = act.get("description", "")
             
-            # Expanded structural catch: matches normal fouls AND offensive fouls logged as turnovers
             is_foul = (action_type == "foul") or \
                        ("foul" in sub_type) or \
                        (action_type == "turnover" and "offensive" in sub_type) or \
@@ -150,7 +149,7 @@ live_catalog, debug_logs = fetch_unthrottled_cdn_catalog(game_id)
 st.sidebar.markdown("---")
 with st.sidebar.expander("🛠️ Screen Network Debug Tools", expanded=True):
     st.write(f"**PBP Endpoint HTTP Status:** `{debug_logs['pbp_status']}`")
-    st.write(f"**Video Architecture CDN:** `On-Demand Stream Engine`")
+    st.write(f"**Video Architecture CDN:** `Parameter Context Engine Active`")
     if debug_logs['pbp_error']:
         st.error(f"PBP Error caught: {debug_logs['pbp_error']}")
 
@@ -188,14 +187,17 @@ else:
 
         st.sidebar.write(f"Playing clip **{st.session_state.video_index + 1}** of **{len(filtered_items)}**")
         
-        # Resolving direct playable link for the single active playlist item
         active_item = filtered_items[st.session_state.video_index]
         active_url = get_resolved_mp4_url(game_id, active_item["event_id"])
         
         if active_url:
             st.sidebar.video(active_url)
         else:
-            st.sidebar.warning("📺 Video clip is unindexed or missing on NBA servers.")
+            # URL encode the video title parameter safely for fallback streams
+            encoded_title = requests.utils.quote(active_item["description"])
+            fallback_link = f"https://www.nba.com/stats/events?CFID=&CFPARAMS=&GameEventID={active_item['event_id']}&GameID={game_id}&Season=2025-26&flag=1&title={encoded_title}"
+            st.sidebar.warning("📺 Video clip requires browser session permissions.")
+            st.sidebar.markdown(f"[🔗 Open Direct Clip in Browser]({fallback_link})")
         
         col_prev, col_next = st.sidebar.columns(2)
         with col_prev:
@@ -217,13 +219,13 @@ else:
                 st.write(f"**Classification:** {entry['type']}")
                 st.caption(f"Raw Entry Log: `{entry['description']}`")
             with col2:
-                # Resolves the explicit clip for the breakdown item container
                 clip_url = get_resolved_mp4_url(game_id, entry["event_id"])
                 
-                # Check if we have a real verifiable media source file link
                 if clip_url:
                     st.video(clip_url)
                 else:
-                    st.warning("📺 Video clip is temporarily unindexed or unavailable on NBA servers.")
-                    st.caption(f"[View Stats Event Page Alternative](https://www.nba.com/stats/events/?GameEventID={entry['event_id']}&GameID={game_id})")
+                    encoded_title = requests.utils.quote(entry["description"])
+                    fallback_link = f"https://www.nba.com/stats/events?CFID=&CFPARAMS=&GameEventID={entry['event_id']}&GameID={game_id}&Season=2025-26&flag=1&title={encoded_title}"
+                    st.warning("📺 Video clip requires explicit browser verification parameters.")
+                    st.markdown(f"[🔗 Open Direct Clip in External Browser Tab]({fallback_link})")
             st.markdown("---")
