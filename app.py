@@ -52,40 +52,17 @@ def parse_foul_details(desc):
     return player_name, foul_type
 
 @st.cache_data(ttl=600)
-def fetch_complete_game_catalog(g_id):
-    """
-    Fetches the textual timeline and the official video localization map simultaneously.
-    Bypasses the restricted API entirely using the NBA's public web asset dictionary.
-    """
+def fetch_online_catalog(g_id):
+    """Instantly pulls down only the CDN timeline data, completely avoiding strict APIs."""
     pbp_url = f"https://cdn.nba.com/static/json/liveData/playbyplay/playbyplay_{g_id}.json"
-    vod_url = f"https://api.nba.com/stats/vodvideolocalization?LeagueID=00&GameID={g_id}"
-    
-    # 1. Fetch Video Asset ID Map (The official NBA website shortcut)
-    video_map = {}
     try:
-        vod_res = requests.get(vod_url, headers=CHROME_HEADERS, impersonate="chrome", timeout=10)
-        if vod_res.status_code == 200:
-            results = vod_res.json().get("resultSets", [])
-            if results:
-                row_set = results[0].get("rowSet", [])
-                # The NBA map provides: [GameID, EventID, VideoAssetID, ...]
-                for row in row_set:
-                    ev_id = str(row[1])
-                    asset_id = str(row[2])
-                    video_map[ev_id] = asset_id
-    except Exception as e:
-        print(f"Error fetching VOD localization map: {e}")
-
-    # 2. Fetch Play-by-Play Timeline
-    try:
-        pbp_res = requests.get(pbp_url, headers=CHROME_HEADERS, impersonate="chrome", timeout=10)
-        if pbp_res.status_code != 200:
+        response = requests.get(pbp_url, headers=CHROME_HEADERS, impersonate="chrome", timeout=10)
+        if response.status_code != 200:
             return None
-        actions = pbp_res.json().get("game", {}).get("actions", [])
+        actions = response.json().get("game", {}).get("actions", [])
     except Exception:
         return None
 
-    # 3. Merge them instantly without calling any loops or extra APIs
     catalog = []
     foul_idx = 0
     for action in actions:
@@ -94,16 +71,10 @@ def fetch_complete_game_catalog(g_id):
         if action_type.lower() == "foul" or "foul" in desc.lower():
             foul_idx += 1
             event_id = str(action.get("actionNumber"))
-            
-            # Check if this play has an official video asset ID inside our map
-            asset_uuid = video_map.get(event_id)
-            if not asset_uuid:
-                continue # Skip if no media track is registered for this historical event
-                
             player, f_type = parse_foul_details(desc)
             
-            # Construct the clean, raw direct high-speed MP4 streaming URL
-            stream_url = f"https://videos.nba.com/nba/pbp/media/{g_id}/{event_id}/{asset_uuid}_1280x720.mp4"
+            # Formulate the direct base asset URLs just like your local machine script did
+            stream_url = f"https://videos.nba.com/nba/pbp/media/{g_id}/{event_id}/9cbf78a4-0982-f5db-f215-62bb8a7e0f22_1280x720.mp4"
             
             catalog.append({
                 "foul_number": foul_idx,
@@ -118,10 +89,10 @@ def fetch_complete_game_catalog(g_id):
             })
     return catalog
 
-live_catalog = fetch_complete_game_catalog(game_id)
+live_catalog = fetch_online_catalog(game_id)
 
 if not live_catalog:
-    st.error("Could not fetch game data or video mapping streams. Double check your Game ID configuration.")
+    st.error("Could not fetch game data. Double check your Game ID configuration.")
 else:
     teams = sorted(list(set(item["team"] for item in live_catalog)))
     players = sorted(list(set(item["player"] for item in live_catalog)))
@@ -156,7 +127,6 @@ else:
 
         st.sidebar.write(f"Playing clip **{st.session_state.video_index + 1}** of **{len(urls_to_play)}**")
         
-        # Load the direct raw file link seamlessly
         st.sidebar.video(urls_to_play[st.session_state.video_index])
         
         col_prev, col_next = st.sidebar.columns(2)
@@ -179,6 +149,6 @@ else:
                 st.write(f"**Classification:** {entry['type']}")
                 st.caption(f"Raw Entry Log: `{entry['description']}`")
             with col2:
-                # Open, high-speed unthrottled streaming video layouts
+                # Direct media stream processing
                 st.video(entry["video_url"])
             st.markdown("---")
