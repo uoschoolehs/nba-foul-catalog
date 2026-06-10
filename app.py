@@ -46,7 +46,7 @@ def parse_foul_details(desc):
     words = clean_desc.split(" ")
     player_words = []
     for word in words:
-        if word.lower() in word.lower() in split_keywords or word.upper() in ["FOUL", "L.B.FOUL"]:
+        if word.lower() in split_keywords or word.upper() in ["FOUL", "L.B.FOUL"]:
             break
         player_words.append(word)
         
@@ -58,7 +58,6 @@ def fetch_unthrottled_cdn_catalog(gid):
     Fetches the play-by-play metadata and video event parameters directly 
     from the NBA APIs using an unthrottled browser impersonator context.
     """
-    # Structuring standard debug metrics dictionary
     debug_metrics = {
         "pbp_status": "Not Attempted",
         "video_status": "Not Attempted",
@@ -69,9 +68,10 @@ def fetch_unthrottled_cdn_catalog(gid):
     }
     catalog = []
     
-    # Endpoints for official NBA play-by-play structure and standard asset maps
+    # Updated NBA APIs endpoints
     pbp_url = f"https://stats.nba.com/stats/playbyplayv3?GameID={gid}&StartPeriod=0&EndPeriod=0"
-    video_cdn_url = f"https://content-api-prod.nba.com/public/1/video/game/{gid}"
+    # New video layout endpoint used by modern stats interface
+    video_cdn_url = f"https://stats.nba.com/stats/videoeventsasset?GameID={gid}"
     
     # 1. Pull Play-By-Play structural feed
     try:
@@ -86,25 +86,32 @@ def fetch_unthrottled_cdn_catalog(gid):
         debug_metrics["pbp_error"] = str(e)
         return catalog, debug_metrics
 
-    # 2. Pull Accompanying Video Event assets mapping
+    # 2. Pull Video Event assets mapping (Updated endpoint strategy)
     video_map = {}
     try:
         vid_res = requests.get(video_cdn_url, headers=CHROME_HEADERS, timeout=10, impersonate="chrome110")
         debug_metrics["video_status"] = vid_res.status_code
         if vid_res.status_code == 200:
             vid_data = vid_res.json()
-            # Try to grab a sample for the visual debugger object view
-            if "results" in vid_data and "items" in vid_data["results"]:
-                items = vid_data["results"]["items"]
-                if items:
-                    debug_metrics["raw_video_sample"] = items[0]
-                # Map out individual structural video assets via action / event IDs
-                for item in items:
-                    # NBA video endpoints track video events relative to eventId integers
-                    ev_id = item.get("eventId")
-                    v_url = item.get("videoUrl") or item.get("playbyplayUrl")
-                    if ev_id and v_url:
-                        video_map[str(ev_id)] = v_url
+            # Parse the modern stats video dictionary format
+            if "resultSets" in vid_data and isinstance(vid_data["resultSets"], list):
+                for rset in vid_data["resultSets"]:
+                    if rset.get("name") == "VideoEvents" or "rowSet" in rset:
+                        rows = rset.get("rowSet", [])
+                        headers = rset.get("headers", [])
+                        
+                        # Find indices for critical values safely
+                        try:
+                            ei_idx = headers.index("EVENTNUM")
+                            url_idx = headers.index("VIDEO_URL")
+                        except ValueError:
+                            continue
+                            
+                        if rows:
+                            debug_metrics["raw_video_sample"] = rows[0]
+                        for row in rows:
+                            if len(row) > max(ei_idx, url_idx):
+                                video_map[str(row[ei_idx])] = row[url_idx]
             debug_metrics["video_keys_found"] = len(video_map)
         else:
             debug_metrics["video_error"] = f"Non-200 return payload: {vid_res.text[:120]}"
@@ -117,20 +124,36 @@ def fetch_unthrottled_cdn_catalog(gid):
         actions = pbp_data.get("game", {}).get("actions", [])
         foul_idx = 1
         for act in actions:
-            # We filter for actions tagged as fouls (typically code type 6)
-            if act.get("actionType") == "foul" or "foul" in str(act.get("subType")).lower():
+            action_type = str(act.get("actionType", "")).lower()
+            sub_type = str(act.get("subType", "")).lower()
+            desc = act.get("description", "")
+            
+            # Expanded structural catch: matches normal fouls AND offensive fouls logged as turnovers
+            is_foul = (action_type == "foul") or \
+                       ("foul" in sub_type) or \
+                       (action_type == "turnover" and "offensive" in sub_type) or \
+                       ("foul" in desc.lower())
+                       
+            if is_foul:
                 event_id = str(act.get("actionNumber"))
-                desc = act.get("description", "")
                 
-                # Assign video URL if matched from CDN mapping, otherwise use generic broadcast stream fallback
-                final_video_url = video_map.get(event_id, f"https://www.nba.com/stats/events/?GameEventID={event_id}&GameID={gid}")
+                # Format clock display smoothly
+                raw_clock = act.get("clock", "00:00")
+                clean_clock = raw_clock.replace("PT", "").replace("M", ":").replace("S", "")
+                if "." in clean_clock:
+                    clean_clock = clean_clock.split(".")[0]
+                
+                # Map video URL if found, or create working direct browser fallbacks
+                final_video_url = video_map.get(event_id)
+                if not final_video_url:
+                    final_video_url = f"https://www.nba.com/stats/events/?GameEventID={event_id}&GameID={gid}"
                 
                 p_name, f_klass = parse_foul_details(desc)
                 
                 catalog.append({
                     "foul_number": foul_idx,
                     "quarter": act.get("period", 1),
-                    "clock": act.get("clock", "00:00"),
+                    "clock": clean_clock,
                     "team": act.get("teamTricode", "Unknown"),
                     "player": p_name if p_name != "Unknown" else (act.get("playerNameI", "Unknown")),
                     "type": f_klass,
@@ -142,6 +165,9 @@ def fetch_unthrottled_cdn_catalog(gid):
         debug_metrics["pbp_error"] = f"Parsing Engine breakdown: {str(e)}"
 
     return catalog, debug_metrics
+
+
+# --- EXECUTION STARTS HERE NOW THAT FUNCTIONS ARE DEFINED ---
 
 # Trigger downstream analytics engine
 live_catalog, debug_logs = fetch_unthrottled_cdn_catalog(game_id)
