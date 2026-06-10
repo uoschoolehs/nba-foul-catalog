@@ -13,7 +13,7 @@ game_id = st.sidebar.text_input("NBA Game ID Input", value="0042500403")
 # Authentic standard browser headers with explicit Referer matrix mapping
 CHROME_HEADERS = {
     "Host": "stats.nba.com",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
     "Referer": "https://www.nba.com/",
@@ -59,12 +59,13 @@ def parse_foul_details(desc):
 @st.cache_data(show_spinner=False)
 def get_resolved_mp4_url(gid, event_id):
     """
-    Queries the official video asset compiler API with exact matching structural 
-    context parameters to force proper raw .mp4 asset payload generation.
+    Queries the backend video API securely. 
+    Crucial Fix: The backend API *strictly* only accepts GameID and GameEventID. 
+    Adding web-UI params like Season here causes a 400 Bad Request rejection.
     """
-    asset_url = f"https://stats.nba.com/stats/videoeventsasset?GameID={gid}&GameEventID={event_id}&Season=2025-26&flag=1"
+    asset_url = f"https://stats.nba.com/stats/videoeventsasset?GameID={gid}&GameEventID={event_id}"
     try:
-        res = requests.get(asset_url, headers=CHROME_HEADERS, timeout=8, impersonate="chrome")
+        res = requests.get(asset_url, headers=CHROME_HEADERS, timeout=8, impersonate="chrome110")
         if res.status_code == 200:
             data = res.json()
             rsets = data.get("resultSets", {})
@@ -79,7 +80,9 @@ def get_resolved_mp4_url(gid, event_id):
                         break
                         
             if video_urls and isinstance(video_urls, list):
-                direct_mp4 = video_urls[0].get("lurl")
+                v = video_urls[0]
+                # Aggressive Quality Fallback: If lurl (large) is missing, grab mobile or SD
+                direct_mp4 = v.get("lurl") or v.get("murl") or v.get("hdurl") or v.get("sdurl") or v.get("vurl")
                 if direct_mp4 and (".mp4" in direct_mp4.lower() or ".m3u8" in direct_mp4.lower()):
                     return direct_mp4
     except Exception:
@@ -90,15 +93,15 @@ def fetch_unthrottled_cdn_catalog(gid):
     """Parses structural play-by-play events timeline list mapping with anti-timeout rules."""
     debug_metrics = {
         "pbp_status": "Not Attempted",
-        "video_status": "API Context Verification On",
+        "video_status": "Strict Backend JSON Routing",
         "pbp_error": None
     }
     catalog = []
-    # Explicitly including LeagueID context mapping parameter to conform with standard browser usage
+    # Explicitly including LeagueID=00 for the PBP endpoint to match browser norms
     pbp_url = f"https://stats.nba.com/stats/playbyplayv3?GameID={gid}&StartPeriod=0&EndPeriod=0&LeagueID=00"
     
     try:
-        pbp_res = requests.get(pbp_url, headers=CHROME_HEADERS, timeout=15, impersonate="chrome")
+        pbp_res = requests.get(pbp_url, headers=CHROME_HEADERS, timeout=15, impersonate="chrome110")
         debug_metrics["pbp_status"] = pbp_res.status_code
         if pbp_res.status_code != 200:
             debug_metrics["pbp_error"] = f"Non-200 return code: {pbp_res.status_code}"
@@ -156,7 +159,7 @@ live_catalog, debug_logs = fetch_unthrottled_cdn_catalog(game_id)
 st.sidebar.markdown("---")
 with st.sidebar.expander("🛠️ Screen Network Debug Tools", expanded=True):
     st.write(f"**PBP Endpoint HTTP Status:** `{debug_logs['pbp_status']}`")
-    st.write(f"**Video Architecture:** `Context API Param Matching Engine`")
+    st.write(f"**Video Architecture:** `{debug_logs['video_status']}`")
     if debug_logs['pbp_error']:
         st.error(f"PBP Error caught: {debug_logs['pbp_error']}")
 
@@ -231,7 +234,8 @@ else:
                     st.video(clip_url)
                 else:
                     encoded_title = requests.utils.quote(entry["description"])
+                    # Web UI explicitly requires the front-end parameters here!
                     fallback_link = f"https://www.nba.com/stats/events?CFID=&CFPARAMS=&GameEventID={entry['event_id']}&GameID={game_id}&Season=2025-26&flag=1&title={encoded_title}"
-                    st.warning("📺 Video streaming link not compiled by server API.")
+                    st.warning("📺 High-Definition streaming link not compiled by server API.")
                     st.markdown(f"[🔗 View Play on NBA Official Site]({fallback_link})")
             st.markdown("---")
