@@ -10,10 +10,10 @@ st.title("🏀 NBA Live Search & Play Catalog")
 # Input field so users can change the game ID dynamically on the live site
 game_id = st.sidebar.text_input("NBA Game ID Input", value="0042500403")
 
-# Authentic standard browser headers to bypass blockades completely
+# Authentic standard browser headers with explicit Referer matrix mapping
 CHROME_HEADERS = {
     "Host": "stats.nba.com",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
     "Referer": "https://www.nba.com/",
@@ -62,13 +62,11 @@ def get_resolved_mp4_url(gid, event_id):
     Queries the official video asset compiler API with exact matching structural 
     context parameters to force proper raw .mp4 asset payload generation.
     """
-    # Explicit required casing for query parameters
     asset_url = f"https://stats.nba.com/stats/videoeventsasset?GameID={gid}&GameEventID={event_id}&Season=2025-26&flag=1"
     try:
-        res = requests.get(asset_url, headers=CHROME_HEADERS, timeout=6, impersonate="chrome110")
+        res = requests.get(asset_url, headers=CHROME_HEADERS, timeout=8, impersonate="chrome")
         if res.status_code == 200:
             data = res.json()
-            # Handle standard object array digging across different API output profiles
             rsets = data.get("resultSets", {})
             video_urls = []
             
@@ -89,17 +87,18 @@ def get_resolved_mp4_url(gid, event_id):
     return None
 
 def fetch_unthrottled_cdn_catalog(gid):
-    """Parses structural play-by-play events timeline list mapping."""
+    """Parses structural play-by-play events timeline list mapping with anti-timeout rules."""
     debug_metrics = {
         "pbp_status": "Not Attempted",
         "video_status": "API Context Verification On",
         "pbp_error": None
     }
     catalog = []
-    pbp_url = f"https://stats.nba.com/stats/playbyplayv3?GameID={gid}&StartPeriod=0&EndPeriod=0"
+    # Explicitly including LeagueID context mapping parameter to conform with standard browser usage
+    pbp_url = f"https://stats.nba.com/stats/playbyplayv3?GameID={gid}&StartPeriod=0&EndPeriod=0&LeagueID=00"
     
     try:
-        pbp_res = requests.get(pbp_url, headers=CHROME_HEADERS, timeout=10, impersonate="chrome110")
+        pbp_res = requests.get(pbp_url, headers=CHROME_HEADERS, timeout=15, impersonate="chrome")
         debug_metrics["pbp_status"] = pbp_res.status_code
         if pbp_res.status_code != 200:
             debug_metrics["pbp_error"] = f"Non-200 return code: {pbp_res.status_code}"
@@ -203,7 +202,7 @@ else:
         else:
             encoded_title = requests.utils.quote(active_item["description"])
             fallback_link = f"https://www.nba.com/stats/events?CFID=&CFPARAMS=&GameEventID={active_item['event_id']}&GameID={game_id}&Season=2025-26&flag=1&title={encoded_title}"
-            st.sidebar.warning("📺 Play source asset must be viewed externally.")
+            st.sidebar.warning("📺 Play asset unavailable for direct player embedding.")
             st.sidebar.markdown(f"[🔗 View Play on NBA Official Site]({fallback_link})")
         
         col_prev, col_next = st.sidebar.columns(2)
@@ -233,6 +232,6 @@ else:
                 else:
                     encoded_title = requests.utils.quote(entry["description"])
                     fallback_link = f"https://www.nba.com/stats/events?CFID=&CFPARAMS=&GameEventID={entry['event_id']}&GameID={game_id}&Season=2025-26&flag=1&title={encoded_title}"
-                    st.warning("📺 Automated streaming link not compiled by server API.")
+                    st.warning("📺 Video streaming link not compiled by server API.")
                     st.markdown(f"[🔗 View Play on NBA Official Site]({fallback_link})")
             st.markdown("---")
