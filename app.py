@@ -62,7 +62,10 @@ headers = {
     "Origin": "https://www.nba.com"
 }
 
-response = requests.get(video_url, headers=headers)
+if not video_url or not video_url.startswith("http"):
+    st.error(f"Invalid video URL: {video_url}")
+else:
+    response = requests.get(video_url, headers=headers)
 
 # Trigger fetch tracking
 live_catalog, debug_logs = fetch_unthrottled_cdn_catalog(game_id)
