@@ -215,20 +215,26 @@ def _fetch_one_video(gid, event_id):
 
 
 # ── Bulk Concurrent Video Fetch ───────────────────────────────────────────────
-@st.cache_data(show_spinner=False, ttl=300)
-def fetch_all_videos(gid, event_ids_tuple):
+# NOTE: intentionally NOT using @st.cache_data here.
+# cache_data permanently stores None for events that failed on first load
+# (e.g. rate-limit burst) and never retries them.
+# session_state only stores successes — failures stay missing and get retried
+# on every load until they resolve.
+
+def fetch_videos_into_session(gid, event_ids):
     """
-    Fires all video asset requests in parallel (max 12 workers).
-    Returns dict: {event_id: url_or_None}
+    Fetches URLs for any event_ids not already in session_state.video_cache.
+    Only writes successful results. Mutates session state directly.
     """
-    results = {}
-    event_ids = list(event_ids_tuple)  # cache requires hashable → tuple in, list out
+    missing = [eid for eid in event_ids if eid not in st.session_state.video_cache]
+    if not missing:
+        return
     with ThreadPoolExecutor(max_workers=6) as pool:
-        futures = {pool.submit(_fetch_one_video, gid, eid): eid for eid in event_ids}
+        futures = {pool.submit(_fetch_one_video, gid, eid): eid for eid in missing}
         for fut in as_completed(futures):
             eid, url = fut.result()
-            results[eid] = url
-    return results
+            if url is not None:
+                st.session_state.video_cache[eid] = url
 
 
 def fallback_link(gid, entry):
@@ -283,14 +289,35 @@ if not filtered:
     st.info("No fouls match the current filters.")
     st.stop()
 
-# ── Bulk-fetch ALL video URLs up front, concurrently ─────────────────────────
-event_ids_tuple = tuple(e["event_id"] for e in filtered)
-with st.spinner(f"Fetching {len(filtered)} video links in parallel..."):
-    video_map = fetch_all_videos(game_id, event_ids_tuple)
+# ── Session state init ────────────────────────────────────────────────────────
+# Reset video cache if game ID changes
+if st.session_state.get("cached_game_id") != game_id:
+    st.session_state.video_cache = {}
+    st.session_state.cached_game_id = game_id
+
+# ── Bulk-fetch ALL video URLs up front ───────────────────────────────────────
+# Fetch across ALL fouls (not just filtered) so switching filters doesn't re-fetch
+all_event_ids = [e["event_id"] for e in live_catalog]
+missing_count = sum(1 for eid in all_event_ids if eid not in st.session_state.video_cache)
+
+if missing_count:
+    with st.spinner(f"Fetching {missing_count} video link(s)..."):
+        fetch_videos_into_session(game_id, all_event_ids)
+
+# Build video_map for the filtered view
+video_map = {eid: st.session_state.video_cache.get(eid) for eid in all_event_ids}
 
 hit  = sum(1 for v in video_map.values() if v)
 miss = len(video_map) - hit
-st.caption(f"✅ {hit} videos resolved · ⚠️ {miss} unavailable (server-side)")
+
+col_stat, col_retry = st.columns([4, 1])
+with col_stat:
+    st.caption(f"✅ {hit} videos resolved · ⚠️ {miss} unresolved")
+with col_retry:
+    if miss > 0 and st.button("🔄 Retry failed"):
+        # Force retry by removing the game ID guard — next run re-fetches missing ones
+        st.session_state.cached_game_id = None
+        st.rerun()
 
 # ── Playlist Mode ─────────────────────────────────────────────────────────────
 st.sidebar.markdown("---")
