@@ -10,13 +10,16 @@ st.title("🏀 NBA Live Search & Play Catalog")
 # Input field so users can change the game ID dynamically on the live site
 game_id = st.sidebar.text_input("NBA Game ID Input", value="0042500403")
 
-# Authentic standard browser headers to look exactly like a real user browsing the stats site
+# Authentic standard browser headers to bypass blockades completely
 CHROME_HEADERS = {
+    "Host": "stats.nba.com",
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
     "Referer": "https://www.nba.com/",
-    "Origin": "https://www.nba.com"
+    "Origin": "https://www.nba.com",
+    "x-nba-stats-origin": "stats",
+    "x-nba-stats-token": "true"
 }
 
 def parse_foul_details(desc):
@@ -54,29 +57,33 @@ def parse_foul_details(desc):
     return player_name, foul_type
 
 @st.cache_data(show_spinner=False)
-def get_resolved_mp4_url(gid, event_id, description):
+def get_resolved_mp4_url(gid, event_id):
     """
-    Scrapes the working video webpage source directly to pull out the hidden raw .mp4 asset URL.
+    Queries the official video asset compiler API with exact matching structural 
+    context parameters to force proper raw .mp4 asset payload generation.
     """
-    encoded_title = requests.utils.quote(description)
-    # The exact working URL path format you discovered
-    target_webpage = f"https://www.nba.com/stats/events?CFID=&CFPARAMS=&GameEventID={event_id}&GameID={gid}&Season=2025-26&flag=1&title={encoded_title}"
-    
+    # Explicit required casing for query parameters
+    asset_url = f"https://stats.nba.com/stats/videoeventsasset?GameID={gid}&GameEventID={event_id}&Season=2025-26&flag=1"
     try:
-        # Requesting the page as a clean HTML browser session
-        res = requests.get(target_webpage, headers=CHROME_HEADERS, timeout=8, impersonate="chrome110")
+        res = requests.get(asset_url, headers=CHROME_HEADERS, timeout=6, impersonate="chrome110")
         if res.status_code == 200:
-            html_content = res.text
+            data = res.json()
+            # Handle standard object array digging across different API output profiles
+            rsets = data.get("resultSets", {})
+            video_urls = []
             
-            # Use regex to find any raw MP4 file paths hidden inside the page script/source
-            mp4_match = re.search(r'(https://[^\s"\']+\.mp4)', html_content, re.IGNORECASE)
-            if mp4_match:
-                return mp4_match.group(1)
-                
-            # Secondary backup check for streaming video format configuration chunks
-            m3u8_match = re.search(r'(https://[^\s"\']+\.m3u8)', html_content, re.IGNORECASE)
-            if m3u8_match:
-                return m3u8_match.group(1)
+            if isinstance(rsets, dict):
+                video_urls = rsets.get("Meta", {}).get("videoUrls", [])
+            elif isinstance(rsets, list):
+                for rset in rsets:
+                    if rset.get("name") == "Meta" or "videoUrls" in rset:
+                        video_urls = rset.get("videoUrls", [])
+                        break
+                        
+            if video_urls and isinstance(video_urls, list):
+                direct_mp4 = video_urls[0].get("lurl")
+                if direct_mp4 and (".mp4" in direct_mp4.lower() or ".m3u8" in direct_mp4.lower()):
+                    return direct_mp4
     except Exception:
         pass
     return None
@@ -85,18 +92,14 @@ def fetch_unthrottled_cdn_catalog(gid):
     """Parses structural play-by-play events timeline list mapping."""
     debug_metrics = {
         "pbp_status": "Not Attempted",
-        "video_status": "HTML Scraper Engine Active",
+        "video_status": "API Context Verification On",
         "pbp_error": None
     }
     catalog = []
     pbp_url = f"https://stats.nba.com/stats/playbyplayv3?GameID={gid}&StartPeriod=0&EndPeriod=0"
     
     try:
-        # Reusing the strict stats host header trick for the play-by-play log pull
-        stats_headers = CHROME_HEADERS.copy()
-        stats_headers["Host"] = "stats.nba.com"
-        
-        pbp_res = requests.get(pbp_url, headers=stats_headers, timeout=10, impersonate="chrome110")
+        pbp_res = requests.get(pbp_url, headers=CHROME_HEADERS, timeout=10, impersonate="chrome110")
         debug_metrics["pbp_status"] = pbp_res.status_code
         if pbp_res.status_code != 200:
             debug_metrics["pbp_error"] = f"Non-200 return code: {pbp_res.status_code}"
@@ -154,7 +157,7 @@ live_catalog, debug_logs = fetch_unthrottled_cdn_catalog(game_id)
 st.sidebar.markdown("---")
 with st.sidebar.expander("🛠️ Screen Network Debug Tools", expanded=True):
     st.write(f"**PBP Endpoint HTTP Status:** `{debug_logs['pbp_status']}`")
-    st.write(f"**Video Architecture:** `Direct HTML Stream Scraper Engine`")
+    st.write(f"**Video Architecture:** `Context API Param Matching Engine`")
     if debug_logs['pbp_error']:
         st.error(f"PBP Error caught: {debug_logs['pbp_error']}")
 
@@ -193,15 +196,15 @@ else:
         st.sidebar.write(f"Playing clip **{st.session_state.video_index + 1}** of **{len(filtered_items)}**")
         
         active_item = filtered_items[st.session_state.video_index]
-        active_url = get_resolved_mp4_url(game_id, active_item["event_id"], active_item["description"])
+        active_url = get_resolved_mp4_url(game_id, active_item["event_id"])
         
         if active_url:
             st.sidebar.video(active_url)
         else:
             encoded_title = requests.utils.quote(active_item["description"])
             fallback_link = f"https://www.nba.com/stats/events?CFID=&CFPARAMS=&GameEventID={active_item['event_id']}&GameID={game_id}&Season=2025-26&flag=1&title={encoded_title}"
-            st.sidebar.warning("📺 Video stream link extraction bottleneck.")
-            st.sidebar.markdown(f"[🔗 Watch Directly on NBA.com]({fallback_link})")
+            st.sidebar.warning("📺 Play source asset must be viewed externally.")
+            st.sidebar.markdown(f"[🔗 View Play on NBA Official Site]({fallback_link})")
         
         col_prev, col_next = st.sidebar.columns(2)
         with col_prev:
@@ -223,14 +226,13 @@ else:
                 st.write(f"**Classification:** {entry['type']}")
                 st.caption(f"Raw Entry Log: `{entry['description']}`")
             with col2:
-                # Resolves the explicit clip for the breakdown item container using the scraper
-                clip_url = get_resolved_mp4_url(game_id, entry["event_id"], entry["description"])
+                clip_url = get_resolved_mp4_url(game_id, entry["event_id"])
                 
                 if clip_url:
                     st.video(clip_url)
                 else:
                     encoded_title = requests.utils.quote(entry["description"])
                     fallback_link = f"https://www.nba.com/stats/events?CFID=&CFPARAMS=&GameEventID={entry['event_id']}&GameID={game_id}&Season=2025-26&flag=1&title={encoded_title}"
-                    st.warning("📺 Automated player extraction missed. Clip is viewable via fallback link.")
-                    st.markdown(f"[🔗 View Player on NBA Official Site]({fallback_link})")
+                    st.warning("📺 Automated streaming link not compiled by server API.")
+                    st.markdown(f"[🔗 View Play on NBA Official Site]({fallback_link})")
             st.markdown("---")
