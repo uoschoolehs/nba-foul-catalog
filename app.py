@@ -72,26 +72,40 @@ def fetch_online_catalog(g_id):
             event_id = str(action.get("actionNumber"))
             player, f_type = parse_foul_details(desc)
             
-            # Use raw secure CDN links directly with cross-origin bypass parameters appended
-            stream_url = f"https://videos.nba.com/nba/pbp/media/{g_id}/{event_id}/9cbf78a4-0982-f5db-f215-62bb8a7e0f22_1280x720.mp4?v={event_id}"
+            # Query the NBA asset manager live to grab the exact authenticated clip URL
+            asset_api_url = f"https://stats.nba.com/stats/videoeventsasset?GameEventID={event_id}&GameID={g_id}"
+            stream_url = None
+            try:
+                asset_res = requests.get(asset_api_url, headers=CHROME_HEADERS, impersonate="chrome", timeout=5)
+                if asset_res.status_code == 200:
+                    video_urls = asset_res.json().get("resultSets", {}).get("Meta", {}).get("videoUrls", [])
+                    if video_urls:
+                        # Grab the secure raw high-res asset link ('lurl') directly from the response
+                        raw_url = video_urls[0].get("lurl")
+                        if raw_url:
+                            stream_url = raw_url.replace("http://", "https://")
+            except Exception:
+                pass
             
-            catalog.append({
-                "foul_number": foul_idx,
-                "event_id": event_id,
-                "team": action.get("teamTricode", "UNKNOWN"),
-                "player": player,
-                "type": f_type,
-                "description": desc,
-                "clock": action.get("clock", "00:00"),
-                "quarter": action.get("period", 1),
-                "video_url": stream_url
-            })
+            # Only add to catalog if a valid streaming asset path was found
+            if stream_url:
+                catalog.append({
+                    "foul_number": foul_idx,
+                    "event_id": event_id,
+                    "team": action.get("teamTricode", "UNKNOWN"),
+                    "player": player,
+                    "type": f_type,
+                    "description": desc,
+                    "clock": action.get("clock", "00:00"),
+                    "quarter": action.get("period", 1),
+                    "video_url": stream_url
+                })
     return catalog
 
 live_catalog = fetch_online_catalog(game_id)
 
 if not live_catalog:
-    st.error("Could not fetch game data. Double check your Game ID configuration.")
+    st.error("Could not fetch game data or video feeds. Double check your Game ID configuration.")
 else:
     teams = sorted(list(set(item["team"] for item in live_catalog)))
     players = sorted(list(set(item["player"] for item in live_catalog)))
@@ -126,7 +140,6 @@ else:
 
         st.sidebar.write(f"Playing clip **{st.session_state.video_index + 1}** of **{len(urls_to_play)}**")
         
-        # Use native video player element
         st.video(urls_to_play[st.session_state.video_index])
         
         col_prev, col_next = st.sidebar.columns(2)
@@ -149,6 +162,5 @@ else:
                 st.write(f"**Classification:** {entry['type']}")
                 st.caption(f"Raw Entry Log: `{entry['description']}`")
             with col2:
-                # Direct media asset player link rendering
                 st.video(entry["video_url"])
             st.markdown("---")
