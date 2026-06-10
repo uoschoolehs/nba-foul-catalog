@@ -51,90 +51,18 @@ def parse_foul_details(desc):
     player_name = " ".join(player_words).strip() if player_words else "Unknown"
     return player_name, foul_type
 
-@st.cache_data(ttl=600, show_spinner=False)
-def fetch_unthrottled_cdn_catalog(g_id):
-    """
-    Simultaneously pulls play-by-play text data and real-time video hashes 
-    directly via public CDN endpoints to bypass strict rate-limiting firewalls.
-    """
-    pbp_url = f"https://cdn.nba.com/static/json/liveData/playbyplay/playbyplay_{g_id}.json"
-    video_cdn_url = f"https://cdn.nba.com/static/json/liveData/video/video_{g_id}.json"
-    
-    debug_info = {
-        "pbp_status": None,
-        "video_status": None,
-        "pbp_error": None,
-        "video_error": None,
-        "video_keys_found": 0,
-        "raw_video_sample": None
-    }
-    
-    # 1. Fetch official asset map from the unthrottled CDN
-    video_map = {}
-    try:
-        vid_res = requests.get(video_cdn_url, headers=CHROME_HEADERS, impersonate="chrome", timeout=10)
-        debug_info["video_status"] = vid_res.status_code
-        if vid_res.status_code == 200:
-            raw_data = vid_res.json()
-            video_events = raw_data.get("video", {}).get("videoEvents", [])
-            debug_info["video_keys_found"] = len(video_events)
-            if video_events:
-                debug_info["raw_video_sample"] = video_events[:2] # grab first two entries as debug sample
-            for event in video_events:
-                ev_id = str(event.get("ei"))  # Event ID key
-                asset_id = str(event.get("uuid"))  # True video string asset key
-                if ev_id and asset_id:
-                    video_map[ev_id] = asset_id
-        else:
-            debug_info["video_error"] = f"Non-200 return payload: {vid_res.text[:200]}"
-    except Exception as e:
-        debug_info["video_status"] = "CRASHED"
-        debug_info["video_error"] = str(e)
+import requests
 
-    # 2. Fetch standard play-by-play timeline log
-    actions = []
-    try:
-        pbp_res = requests.get(pbp_url, headers=CHROME_HEADERS, impersonate="chrome", timeout=10)
-        debug_info["pbp_status"] = pbp_res.status_code
-        if pbp_res.status_code == 200:
-            actions = pbp_res.json().get("game", {}).get("actions", [])
-        else:
-            debug_info["pbp_error"] = f"Non-200 play-by-play return payload: {pbp_res.text[:200]}"
-    except Exception as e:
-        debug_info["pbp_status"] = "CRASHED"
-        debug_info["pbp_error"] = str(e)
+video_url = "THE_NBA_VIDEO_CDN_URL_HERE"
 
-    # 3. Compile them instantly using the downloaded asset strings
-    catalog = []
-    foul_idx = 0
-    for action in actions:
-        action_type = action.get("actionType", "")
-        desc = action.get("description", "")
-        if action_type.lower() == "foul" or "foul" in desc.lower():
-            foul_idx += 1
-            event_id = str(action.get("actionNumber"))
-            
-            # Extract the actual unique file signature from our CDN dictionary mapping
-            asset_uuid = video_map.get(event_id)
-            if not asset_uuid:
-                continue  # Filter out tracking numbers missing official video tracks
-                
-            player, f_type = parse_foul_details(desc)
-            stream_url = f"https://videos.nba.com/nba/pbp/media/{g_id}/{event_id}/{asset_uuid}_1280x720.mp4"
-            
-            catalog.append({
-                "foul_number": foul_idx,
-                "event_id": event_id,
-                "team": action.get("teamTricode", "UNKNOWN"),
-                "player": player,
-                "type": f_type,
-                "description": desc,
-                "clock": action.get("clock", "00:00"),
-                "quarter": action.get("period", 1),
-                "video_url": stream_url
-            })
-            
-    return catalog, debug_info
+# Add headers to trick the server into thinking you are on a standard computer
+headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Referer": "https://www.nba.com/",
+    "Origin": "https://www.nba.com"
+}
+
+response = requests.get(video_url, headers=headers)
 
 # Trigger fetch tracking
 live_catalog, debug_logs = fetch_unthrottled_cdn_catalog(game_id)
