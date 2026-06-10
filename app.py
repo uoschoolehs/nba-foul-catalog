@@ -1,4 +1,5 @@
 import re
+import time
 import streamlit as st
 from curl_cffi import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -176,31 +177,40 @@ def fetch_foul_catalog(gid):
 
 # ── Video URL Fetch (single) ──────────────────────────────────────────────────
 def _fetch_one_video(gid, event_id):
-    """Returns (event_id, mp4_url_or_None)."""
+    """Returns (event_id, mp4_url_or_None). Retries up to 3 times with backoff."""
     url = f"https://stats.nba.com/stats/videoeventsasset?GameEventID={event_id}&GameID={gid}"
-    try:
-        r = requests.get(url, headers=STATS_HEADERS, impersonate=IMPERSONATE, timeout=10)
-        if r.status_code != 200:
-            return event_id, None
-        data = r.json()
-        rsets = data.get("resultSets", {})
 
-        video_urls = []
-        if isinstance(rsets, dict):
-            video_urls = rsets.get("Meta", {}).get("videoUrls", [])
-        elif isinstance(rsets, list):
-            for rs in rsets:
-                if "videoUrls" in rs:
-                    video_urls = rs["videoUrls"]
-                    break
+    for attempt in range(3):
+        try:
+            if attempt > 0:
+                time.sleep(1.5 * attempt)  # 1.5s then 3s
+            r = requests.get(url, headers=STATS_HEADERS, impersonate=IMPERSONATE, timeout=15)
+            if r.status_code == 429:
+                time.sleep(2)
+                continue
+            if r.status_code != 200:
+                continue
+            data = r.json()
+            rsets = data.get("resultSets", {})
 
-        for v in video_urls:
-            for key in ("lurl", "murl", "hdurl", "sdurl", "vurl"):
-                val = v.get(key, "")
-                if val and (".mp4" in val.lower() or ".m3u8" in val.lower()):
-                    return event_id, val
-    except Exception:
-        pass
+            video_urls = []
+            if isinstance(rsets, dict):
+                video_urls = rsets.get("Meta", {}).get("videoUrls", [])
+            elif isinstance(rsets, list):
+                for rs in rsets:
+                    if "videoUrls" in rs:
+                        video_urls = rs["videoUrls"]
+                        break
+
+            for v in video_urls:
+                # surl added — confirmed present in API response
+                for key in ("lurl", "murl", "surl", "hdurl", "sdurl", "vurl"):
+                    val = v.get(key, "")
+                    if val and (".mp4" in val.lower() or ".m3u8" in val.lower()):
+                        return event_id, val
+        except Exception:
+            continue
+
     return event_id, None
 
 
@@ -213,7 +223,7 @@ def fetch_all_videos(gid, event_ids_tuple):
     """
     results = {}
     event_ids = list(event_ids_tuple)  # cache requires hashable → tuple in, list out
-    with ThreadPoolExecutor(max_workers=12) as pool:
+    with ThreadPoolExecutor(max_workers=6) as pool:
         futures = {pool.submit(_fetch_one_video, gid, eid): eid for eid in event_ids}
         for fut in as_completed(futures):
             eid, url = fut.result()
