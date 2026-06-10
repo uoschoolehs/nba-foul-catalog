@@ -51,7 +51,7 @@ def parse_foul_details(desc):
     player_name = " ".join(player_words).strip() if player_words else "Unknown"
     return player_name, foul_type
 
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=600, show_spinner=False)
 def fetch_unthrottled_cdn_catalog(g_id):
     """
     Simultaneously pulls play-by-play text data and real-time video hashes 
@@ -60,28 +60,49 @@ def fetch_unthrottled_cdn_catalog(g_id):
     pbp_url = f"https://cdn.nba.com/static/json/liveData/playbyplay/playbyplay_{g_id}.json"
     video_cdn_url = f"https://cdn.nba.com/static/json/liveData/video/video_{g_id}.json"
     
+    debug_info = {
+        "pbp_status": None,
+        "video_status": None,
+        "pbp_error": None,
+        "video_error": None,
+        "video_keys_found": 0,
+        "raw_video_sample": None
+    }
+    
     # 1. Fetch official asset map from the unthrottled CDN
     video_map = {}
     try:
         vid_res = requests.get(video_cdn_url, headers=CHROME_HEADERS, impersonate="chrome", timeout=10)
+        debug_info["video_status"] = vid_res.status_code
         if vid_res.status_code == 200:
-            video_events = vid_res.json().get("video", {}).get("videoEvents", [])
+            raw_data = vid_res.json()
+            video_events = raw_data.get("video", {}).get("videoEvents", [])
+            debug_info["video_keys_found"] = len(video_events)
+            if video_events:
+                debug_info["raw_video_sample"] = video_events[:2] # grab first two entries as debug sample
             for event in video_events:
                 ev_id = str(event.get("ei"))  # Event ID key
                 asset_id = str(event.get("uuid"))  # True video string asset key
                 if ev_id and asset_id:
                     video_map[ev_id] = asset_id
-    except Exception:
-        pass
+        else:
+            debug_info["video_error"] = f"Non-200 return payload: {vid_res.text[:200]}"
+    except Exception as e:
+        debug_info["video_status"] = "CRASHED"
+        debug_info["video_error"] = str(e)
 
     # 2. Fetch standard play-by-play timeline log
+    actions = []
     try:
         pbp_res = requests.get(pbp_url, headers=CHROME_HEADERS, impersonate="chrome", timeout=10)
-        if pbp_res.status_code != 200:
-            return None
-        actions = pbp_res.json().get("game", {}).get("actions", [])
-    except Exception:
-        return None
+        debug_info["pbp_status"] = pbp_res.status_code
+        if pbp_res.status_code == 200:
+            actions = pbp_res.json().get("game", {}).get("actions", [])
+        else:
+            debug_info["pbp_error"] = f"Non-200 play-by-play return payload: {pbp_res.text[:200]}"
+    except Exception as e:
+        debug_info["pbp_status"] = "CRASHED"
+        debug_info["pbp_error"] = str(e)
 
     # 3. Compile them instantly using the downloaded asset strings
     catalog = []
@@ -112,12 +133,28 @@ def fetch_unthrottled_cdn_catalog(g_id):
                 "quarter": action.get("period", 1),
                 "video_url": stream_url
             })
-    return catalog
+            
+    return catalog, debug_info
 
-live_catalog = fetch_unthrottled_cdn_catalog(game_id)
+# Trigger fetch tracking
+live_catalog, debug_logs = fetch_unthrottled_cdn_catalog(game_id)
+
+# --- VISUAL DEBUGGER INTERFACE BLOCK ---
+st.sidebar.markdown("---")
+with st.sidebar.expander("🛠️ Screen Network Debug Tools", expanded=True):
+    st.write(f"**PBP Endpoint HTTP Status:** `{debug_logs['pbp_status']}`")
+    st.write(f"**Video CDN HTTP Status:** `{debug_logs['video_status']}`")
+    st.write(f"**Assets Extracted Map Count:** `{debug_logs['video_keys_found']}`")
+    if debug_logs['pbp_error'] or debug_logs['video_error']:
+        st.error("Error logs caught on backend streams!")
+        if debug_logs['pbp_error']: st.caption(f"PBP Error: {debug_logs['pbp_error']}")
+        if debug_logs['video_error']: st.caption(f"Video Error: {debug_logs['video_error']}")
+    if debug_logs['raw_video_sample']:
+        st.caption("Raw CDN Video Object Schema:")
+        st.json(debug_logs['raw_video_sample'])
 
 if not live_catalog:
-    st.error("Could not fetch game data or video mapping streams. Double check your Game ID configuration.")
+    st.error("Could not fetch game data or video mapping streams. Check the Network Debug Tools window in the sidebar to see exactly what failed.")
 else:
     teams = sorted(list(set(item["team"] for item in live_catalog)))
     players = sorted(list(set(item["player"] for item in live_catalog)))
