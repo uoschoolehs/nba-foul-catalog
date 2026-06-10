@@ -7,7 +7,6 @@ from curl_cffi import requests
 st.set_page_config(page_title="NBA Live Foul Catalog", layout="wide")
 st.title("🏀 NBA Live Search & Play Catalog")
 
-# Input field so users can change the game ID dynamically on the live site
 game_id = st.sidebar.text_input("NBA Game ID Input", value="0042500403")
 
 CHROME_HEADERS = {
@@ -51,8 +50,24 @@ def parse_foul_details(desc):
     player_name = " ".join(player_words).strip() if player_words else "Unknown"
     return player_name, foul_type
 
-@st.cache_data(ttl=600)  # Cache server data for 10 minutes to save bandwidth
-def fetch_online_catalog(g_id):
+def get_single_video_url(g_id, event_id):
+    """Fetches a single video URL on-demand only when requested by the user"""
+    asset_api_url = f"https://stats.nba.com/stats/videoeventsasset?GameEventID={event_id}&GameID={g_id}"
+    try:
+        res = requests.get(asset_api_url, headers=CHROME_HEADERS, impersonate="chrome", timeout=5)
+        if res.status_code == 200:
+            video_urls = res.json().get("resultSets", {}).get("Meta", {}).get("videoUrls", [])
+            if video_urls:
+                raw_url = video_urls[0].get("lurl")
+                if raw_url:
+                    return raw_url.replace("http://", "https://")
+    except Exception as e:
+        print(f"Error fetching event {event_id}: {e}")
+    return None
+
+@st.cache_data(ttl=600)
+def fetch_timeline_structure(g_id):
+    """Instantly downloads only the textual play-by-play metadata timeline"""
     pbp_url = f"https://cdn.nba.com/static/json/liveData/playbyplay/playbyplay_{g_id}.json"
     try:
         response = requests.get(pbp_url, headers=CHROME_HEADERS, impersonate="chrome", timeout=10)
@@ -72,40 +87,22 @@ def fetch_online_catalog(g_id):
             event_id = str(action.get("actionNumber"))
             player, f_type = parse_foul_details(desc)
             
-            # Query the NBA asset manager live to grab the exact authenticated clip URL
-            asset_api_url = f"https://stats.nba.com/stats/videoeventsasset?GameEventID={event_id}&GameID={g_id}"
-            stream_url = None
-            try:
-                asset_res = requests.get(asset_api_url, headers=CHROME_HEADERS, impersonate="chrome", timeout=5)
-                if asset_res.status_code == 200:
-                    video_urls = asset_res.json().get("resultSets", {}).get("Meta", {}).get("videoUrls", [])
-                    if video_urls:
-                        # Grab the secure raw high-res asset link ('lurl') directly from the response
-                        raw_url = video_urls[0].get("lurl")
-                        if raw_url:
-                            stream_url = raw_url.replace("http://", "https://")
-            except Exception:
-                pass
-            
-            # Only add to catalog if a valid streaming asset path was found
-            if stream_url:
-                catalog.append({
-                    "foul_number": foul_idx,
-                    "event_id": event_id,
-                    "team": action.get("teamTricode", "UNKNOWN"),
-                    "player": player,
-                    "type": f_type,
-                    "description": desc,
-                    "clock": action.get("clock", "00:00"),
-                    "quarter": action.get("period", 1),
-                    "video_url": stream_url
-                })
+            catalog.append({
+                "foul_number": foul_idx,
+                "event_id": event_id,
+                "team": action.get("teamTricode", "UNKNOWN"),
+                "player": player,
+                "type": f_type,
+                "description": desc,
+                "clock": action.get("clock", "00:00"),
+                "quarter": action.get("period", 1),
+            })
     return catalog
 
-live_catalog = fetch_online_catalog(game_id)
+live_catalog = fetch_timeline_structure(game_id)
 
 if not live_catalog:
-    st.error("Could not fetch game data or video feeds. Double check your Game ID configuration.")
+    st.error("Could not fetch game data. Double check your Game ID configuration.")
 else:
     teams = sorted(list(set(item["team"] for item in live_catalog)))
     players = sorted(list(set(item["player"] for item in live_catalog)))
@@ -125,31 +122,35 @@ else:
 
     st.metric(label="Matching Video Clips Located", value=len(filtered_items))
 
-    # --- ADVANCED SEAMLESS PLAYLIST FEATURE ---
+    # --- PLAYLIST MODE (LAZY LOADED) ---
     st.sidebar.markdown("---")
     st.sidebar.header("📺 Seamless Playlist Mode")
     
     if filtered_items:
-        urls_to_play = [item["video_url"] for item in filtered_items]
-        
         if "video_index" not in st.session_state:
             st.session_state.video_index = 0
             
-        if st.session_state.video_index >= len(urls_to_play):
+        if st.session_state.video_index >= len(filtered_items):
             st.session_state.video_index = 0
 
-        st.sidebar.write(f"Playing clip **{st.session_state.video_index + 1}** of **{len(urls_to_play)}**")
+        current_item = filtered_items[st.session_state.video_index]
+        st.sidebar.write(f"Playing clip **{st.session_state.video_index + 1}** of **{len(filtered_items)}**")
         
-        st.video(urls_to_play[st.session_state.video_index])
+        # Lazy load the active video asset link right now
+        active_url = get_single_video_url(game_id, current_item["event_id"])
+        if active_url:
+            st.sidebar.video(active_url)
+        else:
+            st.sidebar.error("Video temporarily unavailable due to NBA host limitations. Try the next clip.")
         
         col_prev, col_next = st.sidebar.columns(2)
         with col_prev:
             if st.button("⬅️ Previous"):
-                st.session_state.video_index = (st.session_state.video_index - 1) % len(urls_to_play)
+                st.session_state.video_index = (st.session_state.video_index - 1) % len(filtered_items)
                 st.rerun()
         with col_next:
             if st.button("Next ➡️"):
-                st.session_state.video_index = (st.session_state.video_index + 1) % len(urls_to_play)
+                st.session_state.video_index = (st.session_state.video_index + 1) % len(filtered_items)
                 st.rerun()
 
     st.markdown("### Individual Clip Index Breakdown")
@@ -162,5 +163,11 @@ else:
                 st.write(f"**Classification:** {entry['type']}")
                 st.caption(f"Raw Entry Log: `{entry['description']}`")
             with col2:
-                st.video(entry["video_url"])
+                # Add an expander button so structural loading only triggers when requested
+                with st.expander("🎞️ Click to Load Video Instance"):
+                    lazy_url = get_single_video_url(game_id, entry["event_id"])
+                    if lazy_url:
+                        st.video(lazy_url)
+                    else:
+                        st.error("NBA API rate limit hit. Try refreshing this block in a few seconds.")
             st.markdown("---")
