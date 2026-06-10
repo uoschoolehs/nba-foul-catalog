@@ -52,17 +52,38 @@ def parse_foul_details(desc):
     return player_name, foul_type
 
 @st.cache_data(ttl=600)
-def fetch_online_catalog(g_id):
-    """Instantly pulls down only the CDN timeline data, completely avoiding strict APIs."""
+def fetch_unthrottled_cdn_catalog(g_id):
+    """
+    Simultaneously pulls play-by-play text data and real-time video hashes 
+    directly via public CDN endpoints to bypass strict rate-limiting firewalls.
+    """
     pbp_url = f"https://cdn.nba.com/static/json/liveData/playbyplay/playbyplay_{g_id}.json"
+    video_cdn_url = f"https://cdn.nba.com/static/json/liveData/video/video_{g_id}.json"
+    
+    # 1. Fetch official asset map from the unthrottled CDN
+    video_map = {}
     try:
-        response = requests.get(pbp_url, headers=CHROME_HEADERS, impersonate="chrome", timeout=10)
-        if response.status_code != 200:
+        vid_res = requests.get(video_cdn_url, headers=CHROME_HEADERS, impersonate="chrome", timeout=10)
+        if vid_res.status_code == 200:
+            video_events = vid_res.json().get("video", {}).get("videoEvents", [])
+            for event in video_events:
+                ev_id = str(event.get("ei"))  # Event ID key
+                asset_id = str(event.get("uuid"))  # True video string asset key
+                if ev_id and asset_id:
+                    video_map[ev_id] = asset_id
+    except Exception:
+        pass
+
+    # 2. Fetch standard play-by-play timeline log
+    try:
+        pbp_res = requests.get(pbp_url, headers=CHROME_HEADERS, impersonate="chrome", timeout=10)
+        if pbp_res.status_code != 200:
             return None
-        actions = response.json().get("game", {}).get("actions", [])
+        actions = pbp_res.json().get("game", {}).get("actions", [])
     except Exception:
         return None
 
+    # 3. Compile them instantly using the downloaded asset strings
     catalog = []
     foul_idx = 0
     for action in actions:
@@ -71,10 +92,14 @@ def fetch_online_catalog(g_id):
         if action_type.lower() == "foul" or "foul" in desc.lower():
             foul_idx += 1
             event_id = str(action.get("actionNumber"))
-            player, f_type = parse_foul_details(desc)
             
-            # Formulate the direct base asset URLs just like your local machine script did
-            stream_url = f"https://videos.nba.com/nba/pbp/media/{g_id}/{event_id}/9cbf78a4-0982-f5db-f215-62bb8a7e0f22_1280x720.mp4"
+            # Extract the actual unique file signature from our CDN dictionary mapping
+            asset_uuid = video_map.get(event_id)
+            if not asset_uuid:
+                continue  # Filter out tracking numbers missing official video tracks
+                
+            player, f_type = parse_foul_details(desc)
+            stream_url = f"https://videos.nba.com/nba/pbp/media/{g_id}/{event_id}/{asset_uuid}_1280x720.mp4"
             
             catalog.append({
                 "foul_number": foul_idx,
@@ -89,10 +114,10 @@ def fetch_online_catalog(g_id):
             })
     return catalog
 
-live_catalog = fetch_online_catalog(game_id)
+live_catalog = fetch_unthrottled_cdn_catalog(game_id)
 
 if not live_catalog:
-    st.error("Could not fetch game data. Double check your Game ID configuration.")
+    st.error("Could not fetch game data or video mapping streams. Double check your Game ID configuration.")
 else:
     teams = sorted(list(set(item["team"] for item in live_catalog)))
     players = sorted(list(set(item["player"] for item in live_catalog)))
@@ -149,6 +174,5 @@ else:
                 st.write(f"**Classification:** {entry['type']}")
                 st.caption(f"Raw Entry Log: `{entry['description']}`")
             with col2:
-                # Direct media stream processing
                 st.video(entry["video_url"])
             st.markdown("---")
