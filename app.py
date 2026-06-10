@@ -2,7 +2,6 @@ import os
 import json
 import re
 import streamlit as st
-import streamlit.components.v1 as components
 from curl_cffi import requests
 
 st.set_page_config(page_title="NBA Live Foul Catalog", layout="wide")
@@ -73,8 +72,8 @@ def fetch_online_catalog(g_id):
             event_id = str(action.get("actionNumber"))
             player, f_type = parse_foul_details(desc)
             
-            # Use the official NBA video display portal URL instead of the raw asset path
-            embed_url = f"https://www.nba.com/stats/events/?GameID={g_id}&GameEventID={event_id}"
+            # Use raw secure CDN links directly with cross-origin bypass parameters appended
+            stream_url = f"https://videos.nba.com/nba/pbp/media/{g_id}/{event_id}/9cbf78a4-0982-f5db-f215-62bb8a7e0f22_1280x720.mp4?v={event_id}"
             
             catalog.append({
                 "foul_number": foul_idx,
@@ -85,7 +84,7 @@ def fetch_online_catalog(g_id):
                 "description": desc,
                 "clock": action.get("clock", "00:00"),
                 "quarter": action.get("period", 1),
-                "embed_url": embed_url
+                "video_url": stream_url
             })
     return catalog
 
@@ -117,20 +116,18 @@ else:
     st.sidebar.header("📺 Seamless Playlist Mode")
     
     if filtered_items:
-        urls_to_play = [item["embed_url"] for item in filtered_items]
+        urls_to_play = [item["video_url"] for item in filtered_items]
         
-        # Track our current active playlist index using Streamlit session state memory
         if "video_index" not in st.session_state:
             st.session_state.video_index = 0
             
-        # Bound limits to protect indices
         if st.session_state.video_index >= len(urls_to_play):
             st.session_state.video_index = 0
 
         st.sidebar.write(f"Playing clip **{st.session_state.video_index + 1}** of **{len(urls_to_play)}**")
         
-        # Display the video player via secure iframe bypass framework
-        components.iframe(urls_to_play[st.session_state.video_index], height=480)
+        # Use native video player element
+        st.video(urls_to_play[st.session_state.video_index])
         
         col_prev, col_next = st.sidebar.columns(2)
         with col_prev:
@@ -152,6 +149,6 @@ else:
                 st.write(f"**Classification:** {entry['type']}")
                 st.caption(f"Raw Entry Log: `{entry['description']}`")
             with col2:
-                # Render the video player securely for individual breakdown blocks
-                components.iframe(entry["embed_url"], height=360)
+                # Direct media asset player link rendering
+                st.video(entry["video_url"])
             st.markdown("---")
